@@ -1,18 +1,19 @@
+
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.Stream;
 
-public class deploy {
+public class Suzuki {
 
     //PORT NUMS
     static final int PORT1 = 5010;
     static final int PORT2 = 5011;
-
 
     //CLOCK
     static volatile int llc_value = 0;
@@ -54,12 +55,12 @@ public class deploy {
     static volatile StringBuilder tokenBuilder;
     static volatile boolean terminate = false;
 
-    //SUZUKI KASAMI TOKEN RELATED
+    /* SUZUKI KASAMI TOKEN RELATED */
     static volatile boolean hasToken = false;
     static volatile int[] tokenArray;
     static volatile Queue<Integer> queueOfProcsVchWillReceiveTheTokenNext;
 
-    //SUZUKI KASAMI STATS RELATED
+    /* SUZUKI KASAMI STATS RELATED */
     static volatile Map<Integer,Long> forWaitTimeCalculation = Collections.synchronizedMap(new HashMap<>());
     static volatile Map<Integer,List<Long>> forWaitTimeCalculationFinal = Collections.synchronizedMap(new HashMap<>());
     static volatile Map<Integer,List<Long>> forSyncDelayCalculation = Collections.synchronizedMap(new HashMap<>());
@@ -67,116 +68,136 @@ public class deploy {
 
     public static void main(String[] args) {
 
-        if (args.length != 0) {
-            if (args[0].equalsIgnoreCase("-c")) {
-                //Running the coordinator part of the process
-                runConfiguration(CONFIG);
-                hasToken = true;
-                isCoordinator = true;
-
-                Thread coordinatorThread = new Thread(() -> {
-                    System.out.println();
-                    System.out.println("<i> ********Coordinator process initiated");
-                    System.out.println("<i> ********Waiting for processes to register...");
-                    System.out.println();
-                    try {
-                        ServerSocket serverSocket = new ServerSocket(PORT2);
-                        while (true) {
-                            Socket client = serverSocket.accept();
-                            Thread handlerThread = new Thread(() -> {
-                                Thread clThread = new Thread(() -> {
-                                    //keep a track of llc_value. initiate CLA every 100 llc_value
-                                });
-                                clThread.start();
-
-                                try {
-                                    PrintWriter out = new PrintWriter(client.getOutputStream(), true);
-                                    BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
-                                    String line;
-                                    int pid;
-                                    while ((line = in.readLine()) != null) {
-                                        String[] lineRecvdByCoord = line.split(",");
-                                        if (lineRecvdByCoord[1].equalsIgnoreCase("register")) {
-                                            synchronized (coordinatorLock) {
-                                                numberOfProcessRegistered++;
-                                                pid = numberOfProcessRegistered;
-                                                pidToHostnameMap.put(pid,
-                                                        new Neighbour(String.valueOf(client.getInetAddress().getHostName()), pid));
-                                                synchronized (llc_lock) {
-                                                    int senderProcTS = Integer.parseInt(lineRecvdByCoord[0]);
-                                                    int maxOfTS = Math.max(senderProcTS, llc_value);
-                                                    llc_value = maxOfTS + 1;
-                                                    System.out.printf("<%d> ********register frm : %s , # of procs registered : %d%n", llc_value, client.getInetAddress().getHostName(), numberOfProcessRegistered);
-                                                }
-                                            }
-                                            while (true) {
-                                                if (numberOfProcessRegistered == NUMBER_OF_PROCS) {
-                                                    break;
-                                                }
-                                            }
-                                            System.out.println();
-                                            Thread.sleep(200);
-                                            //modify below code to apprise the clients about their host id and neighbours
-                                            StringBuilder stringBuilder = new StringBuilder();
-                                            stringBuilder.append(pid);
-                                            Set<Integer> tempSet = neighbours.get(pid);
-                                            for (Integer i : tempSet) {
-                                                stringBuilder.append(",");
-                                                Neighbour neighbour = pidToHostnameMap.get(i);
-                                                stringBuilder.append(neighbour.getHostname() + " " + neighbour.getId());
-                                            }
-                                            synchronized (llc_lock) {
-                                                llc_value++;
-                                                out.println(llc_value + ",registered," + stringBuilder.toString());
-                                                System.out.printf("<%d> ********sending registered to %s%n", llc_value, client.getInetAddress().getHostName());
-                                            }
-                                        }
-                                        if (lineRecvdByCoord[1].equalsIgnoreCase("ready")) {
-                                            synchronized (coordinatorLock) {
-                                                numberOfProcessReady++;
-                                                synchronized (llc_lock) {
-                                                    int senderProcTS = Integer.parseInt(lineRecvdByCoord[0]);
-                                                    int maxOfTS = Math.max(senderProcTS, llc_value);
-                                                    llc_value = maxOfTS + 1;
-                                                    System.out.printf("<%d> ********ready frm : %s , # of procs ready : %d%n", llc_value, client.getInetAddress().getHostName(), numberOfProcessReady);
-                                                }
-                                            }
-                                            while (true) {
-                                                if (numberOfProcessReady == NUMBER_OF_PROCS) {
-                                                    break;
-                                                }
-                                            }
-                                            System.out.println();
-                                            Thread.sleep(200);
-                                            //modify below code to apprise the clients about their host id and neighbours
-                                            synchronized (llc_lock) {
-                                                llc_value++;
-                                                System.out.printf("<%d> ********sending compute to %s%n", llc_value, client.getInetAddress().getHostName());
-                                                out.println(llc_value + ",compute");
-                                            }
-                                        }
-                                    }
-                                    out.close();
-                                    in.close();
-                                    client.close();
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                } catch (InterruptedException e) {
-                                    e.printStackTrace();
-                                }
-                            });
-                            handlerThread.start();
-                            //handlerThread.join();
-                        }
-                    } catch (IOException e) {
-                        System.out.println(e.getMessage());
-                    }
-                });
-                coordinatorThread.start();
-            }
+        if (args.length != 0 && args[0].equalsIgnoreCase("-c")) {
+            startCoordinate();
         }
 
-        //Running the non coordinator part of the process
+        // Running the non coordinator part of the process
+        Thread initializingThread = startInitializingThread();
+
+        Thread clientThreadMain = startClientThreadMain();
+
+        Thread serverThreadMain = startServerThreadMain();
+
+        try {
+            initializingThread.join();
+            clientThreadMain.join();
+            serverThreadMain.join();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private static void startCoordinate() {
+        //Running the coordinator part of the process
+        runConfiguration(CONFIG);
+        hasToken = true;
+        isCoordinator = true;
+
+        Thread coordinatorThread = new Thread(() -> {
+            System.out.println();
+            System.out.println("<i> ********Coordinator process initiated");
+            System.out.println("<i> ********Waiting for processes to register...");
+            System.out.println();
+            try {
+                ServerSocket serverSocket = new ServerSocket(PORT2);
+                while (true) {
+                    Socket client = serverSocket.accept();
+                    Thread handlerThread = new Thread(() -> {
+                        Thread clThread = new Thread(() -> {
+                            //keep a track of llc_value. initiate CLA every 100 llc_value
+                        });
+                        clThread.start();
+
+                        try {
+                            PrintWriter out = new PrintWriter(client.getOutputStream(), true);
+                            BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+                            String line;
+                            int pid;
+                            while ((line = in.readLine()) != null) {
+                                String[] lineRecvdByCoord = line.split(",");
+                                if (lineRecvdByCoord[1].equalsIgnoreCase("register")) {
+                                    synchronized (coordinatorLock) {
+                                        numberOfProcessRegistered++;
+                                        pid = numberOfProcessRegistered;
+                                        pidToHostnameMap.put(pid,
+                                                new Neighbour(String.valueOf(client.getInetAddress().getHostName()), pid));
+                                        synchronized (llc_lock) {
+                                            int senderProcTS = Integer.parseInt(lineRecvdByCoord[0]);
+                                            int maxOfTS = Math.max(senderProcTS, llc_value);
+                                            llc_value = maxOfTS + 1;
+                                            System.out.printf("<%d> ********register frm : %s , # of procs registered : %d%n", llc_value, client.getInetAddress().getHostName(), numberOfProcessRegistered);
+                                        }
+                                    }
+                                    while (true) {
+                                        if (numberOfProcessRegistered == NUMBER_OF_PROCS) {
+                                            break;
+                                        }
+                                    }
+                                    System.out.println();
+                                    Thread.sleep(200);
+                                    //modify below code to apprise the clients about their host id and neighbours
+                                    StringBuilder stringBuilder = new StringBuilder();
+                                    stringBuilder.append(pid);
+                                    Set<Integer> tempSet = neighbours.get(pid);
+                                    for (Integer i : tempSet) {
+                                        stringBuilder.append(",");
+                                        Neighbour neighbour = pidToHostnameMap.get(i);
+                                        stringBuilder.append(neighbour.getHostname() + " " + neighbour.getId());
+                                    }
+                                    synchronized (llc_lock) {
+                                        llc_value++;
+                                        out.println(llc_value + ",registered," + stringBuilder.toString());
+                                        System.out.printf("<%d> ********sending registered to %s%n", llc_value, client.getInetAddress().getHostName());
+                                    }
+                                }
+                                if (lineRecvdByCoord[1].equalsIgnoreCase("ready")) {
+                                    synchronized (coordinatorLock) {
+                                        numberOfProcessReady++;
+                                        synchronized (llc_lock) {
+                                            int senderProcTS = Integer.parseInt(lineRecvdByCoord[0]);
+                                            int maxOfTS = Math.max(senderProcTS, llc_value);
+                                            llc_value = maxOfTS + 1;
+                                            System.out.printf("<%d> ********ready frm : %s , # of procs ready : %d%n", llc_value, client.getInetAddress().getHostName(), numberOfProcessReady);
+                                        }
+                                    }
+                                    while (true) {
+                                        if (numberOfProcessReady == NUMBER_OF_PROCS) {
+                                            break;
+                                        }
+                                    }
+                                    System.out.println();
+                                    Thread.sleep(200);
+                                    //modify below code to apprise the clients about their host id and neighbours
+                                    synchronized (llc_lock) {
+                                        llc_value++;
+                                        System.out.printf("<%d> ********sending compute to %s%n", llc_value, client.getInetAddress().getHostName());
+                                        out.println(llc_value + ",compute");
+                                    }
+                                }
+                            }
+                            out.close();
+                            in.close();
+                            client.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                    });
+                    handlerThread.start();
+                    //handlerThread.join();
+                }
+            } catch (IOException e) {
+                System.out.println(e.getMessage());
+            }
+        });
+        coordinatorThread.start();
+    }
+
+
+    private static Thread startInitializingThread() {
         Thread initializingThread = new Thread(() -> {
             try {
                 Thread.sleep(200);
@@ -269,7 +290,12 @@ public class deploy {
                 e.printStackTrace();
             }
         });
+        initializingThread.start();
+        return initializingThread;
+    }
 
+
+    private static Thread startClientThreadMain() {
         Thread clientThreadMain = new Thread(() -> {
             while (true) {
                 if (canSendHello)
@@ -462,8 +488,12 @@ public class deploy {
                 clientThreadAncillary.start();
             }
         });
+        clientThreadMain.start();
+        return clientThreadMain;
+    }
 
 
+    private static Thread startServerThreadMain() {
         Thread serverThreadMain = new Thread(() -> {
             try {
                 ServerSocket serverSocket = new ServerSocket(PORT1);
@@ -592,20 +622,10 @@ public class deploy {
                 e.printStackTrace();
             }
         });
-
-        initializingThread.start();
-        clientThreadMain.start();
         serverThreadMain.start();
-
-
-        try {
-            initializingThread.join();
-            clientThreadMain.join();
-            serverThreadMain.join();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+        return serverThreadMain;
     }
+
 
     private static void runConfiguration(String fileLocation) {
         try {
@@ -643,58 +663,8 @@ public class deploy {
         }
     }
 
-
     private static void executeCS() throws InterruptedException {
         System.out.println("acquiring CS...");
         Thread.sleep(10000);
     }
 }
-
-/*
-class Neighbour {
-    private int id;
-    private String hostname;
-    private String portnum;
-
-    public Neighbour(){}
-
-    public Neighbour(String hostname,int id){
-        this.hostname=hostname;
-        this.id=id;
-    }
-
-    public Neighbour(String hostname){
-        this.hostname=hostname;
-    }
-    public Neighbour(String hostname, String portnum) {
-        this.hostname = hostname;
-        this.portnum = portnum;
-    }
-
-    public Neighbour(int id, String hostname, String portnum) {
-        this.id = id;
-        this.hostname = hostname;
-        this.portnum = portnum;
-    }
-
-    public String getHostname() {
-        return hostname;
-    }
-
-    public void setHostname(String hostname) {
-        this.hostname = hostname;
-    }
-
-    public String getPortnum() {
-        return portnum;
-    }
-
-    public void setPortnum(String portnum) {
-        this.portnum = portnum;
-    }
-
-    public int getId() {
-        return id;
-    }
-}
-*/
