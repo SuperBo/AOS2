@@ -1,9 +1,5 @@
-import org.omg.CORBA.INTERNAL;
-
 import java.io.*;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
 
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
@@ -16,32 +12,28 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.stream.Stream;
 
 public class Raymond {
-    // Charset
+    /* Charset */
     static final Charset charset = StandardCharsets.UTF_8;
 
-    //PORT NUMS
-    static final int PORT1 = 51010;
-    static final int COPORT = 51015;
-    static ServerSocketChannel nodeServer;
+    /* PORT NUMS */
+    private static final int PORT1 = 51010;
+    private static final int COPORT = 51015;
+    private static ServerSocketChannel nodeServer;
 
-    //CLOCK
-    static volatile int llc_value = 0;
-    static Object llc_lock = new Object();
+    /* Lamport clock */
+    static volatile int clock = 0;
+    static final Object llc_lock = new Object();
 
     //COORDINATOR PROCESS PARAMS
     static int NUMBER_OF_PROCS;
     static final Object coordinatorLock = new Object();
     static final String CONFIG = "dsConfig";
-    static Map<Integer, Set<Integer>> neighbours = new HashMap<>();
     static Map<Integer, String> pidToHostnameMap = new HashMap<>();
     static int PROCESSID;
     static int TERMINATE;
@@ -51,30 +43,23 @@ public class Raymond {
     static int TIME2;
     static int CSTIME;
 
-    //NON COORDINATOR PROCESS PARAMS
-    static volatile boolean canSendCSRequestAndTokens = false;
-    static BlockingQueue<Integer> blockingQueue = new ArrayBlockingQueue<>(1);
-    static volatile int numberOfNeighbours = 0;
-    static Object lock = new Object();
+    // NON COORDINATOR PROCESS PARAMS
     static Map<Integer, String> localNeighbourMap = new HashMap<>();
     static Map<Integer, SocketChannel> neighbourSockets = new HashMap<>();
-    static volatile int[] sendArray;
-    static volatile int[] recvArray;
-    private static volatile boolean terminted = false;
+    private static volatile boolean terminated = false;
 
 
-    // RAYMOND RELATED
+    /* RAYMOND RELATED */
     private static Queue<Integer> csQueue = new LinkedList<>();
     private static AtomicBoolean haveToken = new AtomicBoolean(false);
     private static final Lock csLock = new ReentrantLock();
     private static final Condition csEnter = csLock.newCondition();
-    private static final Condition csRelease = csLock.newCondition();
-    private static int tokenPID;
+    private static boolean csRunning = false;
+    private static int holderPID;
     private static int csSeq = 0;
 
-    /* SUZUKI KASAMI TOKEN RELATED */
 
-    /* SUZUKI KASAMI STATS RELATED */
+    /* STATS RELATED */
     static volatile Map<Integer,Long> forWaitTimeCalculation = Collections.synchronizedMap(new HashMap<>());
     static volatile Map<Integer,List<Long>> forWaitTimeCalculationFinal = Collections.synchronizedMap(new HashMap<>());
     static volatile Map<Integer,List<Long>> forSyncDelayCalculation = Collections.synchronizedMap(new HashMap<>());
@@ -96,7 +81,8 @@ public class Raymond {
             startInitializing();
 
             // Run the compute simulation
-            (new Thread(Raymond::runBackground)).start();
+            csBackground = new Thread(Raymond::runBackground);
+            csBackground.start();
             runCompute();
         }
         catch (Exception e) {
@@ -105,6 +91,9 @@ public class Raymond {
         finally {
             if (coorThread != null) {
                 coorThread.join();
+            }
+            if (csBackground != null) {
+                csBackground.join();
             }
         }
     }
@@ -261,8 +250,8 @@ public class Raymond {
 
         String[] totalNumberOfProcs = reader.readLine().split(" ");
         int arraySize = Integer.parseInt(totalNumberOfProcs[3]);
-        sendArray = new int[arraySize];
-        recvArray = new int[arraySize];
+        //sendArray = new int[arraySize];
+        //recvArray = new int[arraySize];
 
         // Read neighbour info from CoOrdinator
         ByteBuffer readbuf = ByteBuffer.allocate(25 * 128);
@@ -273,7 +262,7 @@ public class Raymond {
         System.out.println("  Registration success");
 
         PROCESSID = Integer.parseInt(parsedReceivedLine[0]);
-        tokenPID = Integer.parseInt(parsedReceivedLine[1]);
+        holderPID = Integer.parseInt(parsedReceivedLine[1]);
 
         if (PROCESSID == 1) {
             haveToken.set(true);
@@ -288,7 +277,6 @@ public class Raymond {
 
             //localNeighbourSet.add(new Neighbour(detailsOfNeighbour[0], Integer.parseInt(detailsOfNeighbour[1])));
             localNeighbourMap.put(npid, nhostname);
-            numberOfNeighbours++;
             System.out.println("    " + npid + ": " + nhostname);
         }
         System.out.println("    -----------------------");
@@ -311,10 +299,6 @@ public class Raymond {
             System.err.println("  expect 'COMPUTE' but received " + line);
             return;
         }
-
-        //
-        System.out.println(">> PID " + PROCESSID + " start COMPUTE <<");
-        System.out.println("--------------------------");
 
         // Close connection and end initializing
         coor.close();
@@ -377,31 +361,36 @@ public class Raymond {
     }
 
     private static void runCompute() {
+        System.out.println(">> PID " + PROCESSID + " start COMPUTE <<");
+        System.out.println("--------------------------");
+
         Random waitTimeRand = new Random();
         Random intervalRand = new Random();
         int waitTimeRange = TIME2 - TIME1 + 1;
+        int num_repeat = 20 + (new Random()).nextInt(21);
 
-        // Sleep before requesting CS
-        try {
-            Thread.sleep(TIME1 + waitTimeRand.nextInt(waitTimeRange));
-        }
-        catch (InterruptedException e) {
-            System.err.println("First sleep interrupted");
+        for (int i = 0; i < num_repeat; ++i) {
+            // Sleep before requesting CS
+            try {
+                Thread.sleep(TIME1 + waitTimeRand.nextInt(waitTimeRange));
+            }
+            catch (InterruptedException e) {
+                System.err.println("First sleep interrupted");
+            }
+
+            // Execute the CS
+            executeCS(CSTIME);
+
+            // Sleep after finishing CS
+            try {
+                Thread.sleep(20 + intervalRand.nextInt(21));
+            }
+            catch (InterruptedException e) {
+                System.err.println("Second sleep interrupted");
+            }
         }
 
-        // Execute the CS
-        executeCS(CSTIME);
-
-        // Sleep after finished CS
-        try {
-            Thread.sleep(20 + intervalRand.nextInt(21));
-        }
-        catch (InterruptedException e) {
-            System.err.println("Second sleep interrupted");
-        }
-
-        // Terminate program
-        terminted = true;
+        terminated = true;
     }
 
     private static void runBackground() {
@@ -413,75 +402,91 @@ public class Raymond {
                 socket.register(selector, SelectionKey.OP_READ);
             }
 
-            while (!terminted) {
+            while (!terminated) {
                 selector.select(500);
-                Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                Iterator<SelectionKey> keyIter = selector.selectedKeys().iterator();
 
-                for (SelectionKey key : selectedKeys) {
+                while (keyIter.hasNext()) {
+                    SelectionKey key = keyIter.next();
+                    keyIter.remove();
+
                     if (key.isReadable()) {
                         SocketChannel socket = (SocketChannel) key.channel();
                         ByteBuffer buf = ByteBuffer.allocate(64);
-                        socket.read(buf);
+
+                        if (socket.read(buf) < 0) {
+                            // Client connection closed from client side
+                            key.cancel();
+                            socket.close();
+                            continue;
+                        };
 
                         String[] msg = new String(buf.array(), charset).trim().split(" ");
 
-                        if (msg[0].equals("REQUEST")) {
-                            int frpid = Integer.parseInt(msg[1]);
-                            csLock.lock();
-                            try {
-                                if (csQueue.isEmpty()) {
-                                    if (haveToken.compareAndSet(true, false)) {
-                                        sendToken(frpid);
+                        int i = 0;
+                        while (i < msg.length) {
+                            int msg_clock = Integer.parseInt(msg[i]);
+                            synchronized (llc_lock) {
+                                clock = Integer.max(clock + 1, msg_clock + 1);
+                                System.out.println(clock + "': received " + msg[i+1]);
+                            }
+                            i++;
+                            // On receiving REQUEST
+                            if (msg[i].equals("REQUEST")) {
+                                int asked_pid = Integer.parseInt(msg[i+1]);
+                                csLock.lock();
+                                try {
+                                    if (holderPID == PROCESSID) {
+                                        if (!csRunning && csQueue.isEmpty()) {
+                                            sendToken(asked_pid);
+                                        }
+                                        else {
+                                            csQueue.add(asked_pid);
+                                        }
                                     }
                                     else {
-                                        sendCSRequest();
-                                        csQueue.add(frpid);
+                                        if (csQueue.isEmpty()) {
+                                            csQueue.add(asked_pid);
+                                            sendCSRequest();
+                                        }
+                                        else {
+                                            csQueue.add(asked_pid);
+                                        }
                                     }
                                 }
-                                else {
-                                    csQueue.add(frpid);
+                                finally {
+                                    csLock.unlock();
                                 }
+                                i += 2;
                             }
-                            finally {
-                                csLock.unlock();
-                            }
-                        }
-                        else if (msg[0].equals("TOKEN")) {
-                            csLock.lock();
-                            try {
-                                if (csQueue.element() == PROCESSID) {
-                                    // Serve myself
-                                    haveToken.set(true);
-                                    csEnter.signal();
-                                    csRelease.wait();
-                                }
+                            // On receiving TOKEN
+                            else if (msg[i].equals("TOKEN")) {
+                                csLock.lock();
+                                try {
+                                    int req_pid = csQueue.remove();
 
-                                if (!csQueue.isEmpty()) {
-                                    int sendto = csQueue.remove();
-                                    if (csQueue.isEmpty()) {
-                                        haveToken.set(false);
-                                        sendToken(sendto);
-                                    } else {
-                                        haveToken.set(false);
-                                        sendTokenNRequest(sendto);
+                                    if (req_pid == PROCESSID) {
+                                        holderPID = PROCESSID;
+                                        csEnter.signal();
+                                    }
+                                    else {
+                                        sendToken(req_pid);
+                                        if (!csQueue.isEmpty()) {
+                                            sendCSRequest();
+                                        }
                                     }
                                 }
-
-                                if (msg[1].equals("REQUEST")) {
-                                    csQueue.add(Integer.parseInt(msg[2]));
+                                finally {
+                                    csLock.unlock();
                                 }
-                            }
-                            finally {
-                                csLock.unlock();
+                                i++;
                             }
                         }
                     }
                 }
+
             }
-        }
-        catch (InterruptedException e) {
-            System.err.println("Interrupted");
-            e.printStackTrace();
+            selector.close();
         }
         catch (IOException e) {
             System.err.println("IO Exception");
@@ -490,8 +495,14 @@ public class Raymond {
     }
 
     private static void sendCSRequest() {
-        SocketChannel tokenChannel = neighbourSockets.get(tokenPID);
-        String msg = "REQUEST " + PROCESSID;
+        String msg;
+        synchronized (llc_lock) {
+            clock++;
+            System.out.println(clock + "': Send REQUEST to " + holderPID);
+            msg = clock + " REQUEST " + PROCESSID + " ";
+        }
+
+        SocketChannel tokenChannel = neighbourSockets.get(holderPID);
 
         try {
             tokenChannel.write(ByteBuffer.wrap(msg.getBytes(charset)));
@@ -502,24 +513,18 @@ public class Raymond {
     }
 
     private static void sendToken(int topid) {
-        String msg = "TOKEN";
-        SocketChannel toChannel = neighbourSockets.get(topid);
-        try {
-            toChannel.write(ByteBuffer.wrap(msg.getBytes(charset)));
-            tokenPID= topid;
+        String msg;
+        synchronized (llc_lock) {
+            clock++;
+            System.out.println(clock + "': Send TOKEN to " + topid);
+            msg = clock + " TOKEN ";
         }
-        catch (IOException e) {
-            System.err.println("Failed to send TOKEN");
-        }
-    }
-
-    private static void sendTokenNRequest(int topid) {
-        String msg = "TOKEN REQUEST " + PROCESSID;
 
         SocketChannel toChannel = neighbourSockets.get(topid);
+
         try {
             toChannel.write(ByteBuffer.wrap(msg.getBytes(charset)));
-            tokenPID = topid;
+            holderPID = topid;
         }
         catch (IOException e) {
             System.err.println("Failed to send TOKEN");
@@ -553,36 +558,55 @@ public class Raymond {
         }
     }
 
-    private static void executeCS(int cstime) {
+    private static void executeCS(int cs_time) {
+        csSeq++;
+        System.out.println(clock + "': request CS " + csSeq);
+
         csLock.lock();
         try {
-            if (csQueue.isEmpty()) {
-                csQueue.add(PROCESSID);
-
-                if (!haveToken.get())
+            if (holderPID != PROCESSID || !csQueue.isEmpty()) {
+                if (csQueue.isEmpty()) {
                     sendCSRequest();
-            }
-            else {
+                }
                 csQueue.add(PROCESSID);
-            }
 
-            while (!haveToken.get()) {
                 csEnter.await();
             }
+            csRunning = true;
+        }
+        catch (InterruptedException e){
+            System.err.println("Interrupted while waiting for CS");
+        }
+        finally {
+            csLock.unlock();
+        }
 
-            csSeq++;
-            System.out.println(PROCESSID + " running CS " + csSeq);
-            Thread.sleep(cstime);
-            System.out.println(PROCESSID + " finished CS " + csSeq);
-
-            csRelease.signal();
-
-            // Remove itself from the top of queue
-            csQueue.remove();
+        // Enter CS
+        synchronized (llc_lock) {
+            clock++;
+            System.out.println(clock + "': enter CS " + csSeq);
+        }
+        try {
+            Thread.sleep(cs_time);
         }
         catch (InterruptedException e) {
-            System.err.println("Enter CS Failed!");
+            System.err.println(e);
             e.printStackTrace();
+        }
+
+        // Leaving CS
+        System.out.println(clock + "': leave CS " + csSeq);
+        csLock.lock();
+        try {
+            csRunning = false;
+            if (!csQueue.isEmpty())  {
+                int req_pid = csQueue.remove();
+                sendToken(req_pid);
+
+                if (!csQueue.isEmpty()) {
+                    sendCSRequest();
+                }
+            }
         }
         finally {
             csLock.unlock();
