@@ -1,4 +1,3 @@
-import com.sun.scenario.effect.impl.sw.sse.SSEBlend_ADDPeer;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -12,7 +11,6 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -26,11 +24,7 @@ public class Raymond {
     private static final int COPORT = 51015;
     private static ServerSocketChannel nodeServer;
 
-    /* Lamport clock */
-    static volatile int clock = 0;
-    static final Object llc_lock = new Object();
-
-    //COORDINATOR PROCESS PARAMS
+    /* COORDINATOR PROCESS PARAMS */
     static int NUMBER_OF_PROCS;
     static final Object coordinatorLock = new Object();
     static final String CONFIG = "dsConfig";
@@ -63,10 +57,8 @@ public class Raymond {
     private static int total_wait_time = 0;
     private static int max_sync_delay = -1;
     private static int total_sync_delay = 0;
-    static volatile Map<Integer,Long> forWaitTimeCalculation = Collections.synchronizedMap(new HashMap<>());
-    static volatile Map<Integer,List<Long>> forWaitTimeCalculationFinal = Collections.synchronizedMap(new HashMap<>());
-    static volatile Map<Integer,List<Long>> forSyncDelayCalculation = Collections.synchronizedMap(new HashMap<>());
-
+    private static int max_sync_delay_time = -1;
+    private static int total_sync_delay_time = 0;
 
     public static void main(String[] args) throws InterruptedException, IOException{
         Thread coorThread = null;
@@ -224,6 +216,8 @@ public class Raymond {
             int all_wait_time = 0;
             int all_sync_delay = 0;
             int max_all_sync_delay = 0;
+            int all_sync_delay_time = 0;
+            int max_sync_delay_time = 0;
             i = 0;
             while (i < clients.size()) {
                 int pid = i + 1;
@@ -237,20 +231,29 @@ public class Raymond {
                     total_cs += Integer.parseInt(rcv[1]);
                     total_mess_sent += Integer.parseInt(rcv[2]);
                     all_wait_time += Integer.parseInt(rcv[3]);
+
                     int m_sync_delay = Integer.parseInt(rcv[4]);
                     if (m_sync_delay > max_all_sync_delay) {
                         max_all_sync_delay = m_sync_delay;
                     }
                     all_sync_delay += Integer.parseInt(rcv[5]);
+
+                    int m_sync_delay_time = Integer.parseInt(rcv[6]);
+                    if (m_sync_delay_time > max_sync_delay_time) {
+                        max_sync_delay_time = m_sync_delay_time;
+                    }
+                    all_sync_delay_time += Integer.parseInt(rcv[7]);
                 }
             }
             System.out.println("Total CS Request: " + total_cs);
             System.out.println("Total messages sent: " + total_mess_sent);
-            System.out.println("Total wait time: " + all_wait_time);
+            System.out.println("Total wait time: " + all_wait_time +" ms");
             System.out.format("Messages per CS: %.4f%n", (double) total_mess_sent/total_cs);
-            System.out.format("Wait time per CS: %.4f%n", (double) all_wait_time/total_cs);
+            System.out.format("Wait time per CS: %.4f ms%n", (double) all_wait_time/total_cs);
             System.out.println("Max synchronization delay: " + max_all_sync_delay);
             System.out.format("Average synchronization delay: %.4f%n", (double) all_sync_delay/total_cs);
+            System.out.println("Max synchronization delay in ms: " + max_sync_delay_time + " ms");
+            System.out.format("Average synchronization delay in time: %.4f ms%n", (double) all_sync_delay_time/total_cs);
 
             // Send TERMINATED to all and end connection
             for (SocketChannel client : clients.values()) {
@@ -488,6 +491,10 @@ public class Raymond {
             builder.append(max_sync_delay);
             builder.append(' ');
             builder.append(total_sync_delay);
+            builder.append(' ');
+            builder.append(max_sync_delay_time);
+            builder.append(' ');
+            builder.append(total_sync_delay_time);
             String complete_msg = builder.toString();
             coorSocket.write(ByteBuffer.wrap(complete_msg.getBytes(charset)));
 
@@ -544,11 +551,8 @@ public class Raymond {
 
                         int i = 0;
                         while (i < msg.length) {
-                            int msg_clock = Integer.parseInt(msg[i]);
-                            synchronized (llc_lock) {
-                                clock = Integer.max(clock + 1, msg_clock + 1);
-                                System.out.println(clock + "': received " + msg[i+1]);
-                            }
+                            long msg_clock = Long.parseLong(msg[i]);
+                            log("received " + msg[i+1]);
                             i++;
 
                             // On receiving REQUEST
@@ -558,7 +562,7 @@ public class Raymond {
                                 try {
                                     if (holderPID == PROCESSID) {
                                         if (!csRunning && csQueue.isEmpty()) {
-                                            sendToken(asked_pid, 0);
+                                            sendToken(asked_pid, 0, System.currentTimeMillis());
                                         }
                                         else {
                                             csQueue.add(asked_pid);
@@ -582,6 +586,7 @@ public class Raymond {
                             // On receiving TOKEN
                             else if (msg[i].equals("TOKEN")) {
                                 int prev_hop = Integer.parseInt(msg[i+1]);
+                                long token_time = Long.parseLong(msg[i+2]);
                                 int hop = prev_hop + 1;
 
                                 csLock.lock();
@@ -589,12 +594,12 @@ public class Raymond {
                                     int req_pid = csQueue.remove();
 
                                     if (req_pid == PROCESSID) {
-                                        computeSyncDelay(hop);
+                                        computeSyncDelay(hop, (int) (System.currentTimeMillis() - token_time));
                                         holderPID = PROCESSID;
                                         csEnter.signal();
                                     }
                                     else {
-                                        sendToken(req_pid, hop);
+                                        sendToken(req_pid, hop, token_time);
                                         if (!csQueue.isEmpty()) {
                                             sendCSRequest();
                                         }
@@ -603,7 +608,7 @@ public class Raymond {
                                 finally {
                                     csLock.unlock();
                                 }
-                                i += 2;
+                                i += 3;
                             }
                         }
                     }
@@ -620,11 +625,9 @@ public class Raymond {
 
     private static void sendCSRequest() {
         String msg;
-        synchronized (llc_lock) {
-            clock++;
-            System.out.println(clock + "': Send REQUEST to " + holderPID);
-            msg = clock + " REQUEST " + PROCESSID + " ";
-        }
+        long clock = System.currentTimeMillis();
+        System.out.println(clock + ": Send REQUEST to " + holderPID);
+        msg = clock + " REQUEST " + PROCESSID + " ";
 
         SocketChannel tokenChannel = neighbourSockets.get(holderPID);
 
@@ -637,13 +640,11 @@ public class Raymond {
         }
     }
 
-    private static void sendToken(int topid, int hop) {
+    private static void sendToken(int topid, int hop, long token_time) {
         String msg;
-        synchronized (llc_lock) {
-            clock++;
-            System.out.println(clock + "': Send TOKEN to " + topid);
-            msg = clock + " TOKEN " + hop + " ";
-        }
+        long clock = System.currentTimeMillis();
+        log(clock, "Send TOKEN to " + topid);
+        msg = clock + " TOKEN " + hop + " " + token_time + " ";
 
         SocketChannel toChannel = neighbourSockets.get(topid);
 
@@ -684,17 +685,22 @@ public class Raymond {
         }
     }
 
-    private static void computeSyncDelay(int sync_delay) {
+    private static void computeSyncDelay(int sync_delay, int sync_delay_time) {
         if (sync_delay > max_sync_delay) {
             max_sync_delay = sync_delay;
         }
         total_sync_delay += sync_delay;
+
+        if (sync_delay_time > max_sync_delay_time) {
+            max_sync_delay_time = sync_delay_time;
+        }
+        total_sync_delay_time += sync_delay_time;
     }
 
     private static void executeCS(int cs_time) {
         csSeq++;
-        int req_time = clock;
-        System.out.println(req_time + "': request CS " + csSeq);
+        long req_time = System.currentTimeMillis();
+        log(req_time, "request CS " + csSeq);
 
         csLock.lock();
         try {
@@ -716,11 +722,9 @@ public class Raymond {
         }
 
         // Enter CS
-        synchronized (llc_lock) {
-            total_wait_time += clock - req_time;
-            clock++;
-            System.out.println(clock + "': enter CS " + csSeq);
-        }
+        long enter_time = System.currentTimeMillis();
+        total_wait_time += enter_time - req_time;
+        log(enter_time, "enter CS " + csSeq);
         try {
             Thread.sleep(cs_time);
         }
@@ -730,13 +734,13 @@ public class Raymond {
         }
 
         // Leaving CS
-        System.out.println(clock + "': leave CS " + csSeq);
+        log("leave CS " + csSeq);
         csLock.lock();
         try {
             csRunning = false;
             if (!csQueue.isEmpty())  {
                 int req_pid = csQueue.remove();
-                sendToken(req_pid, 0);
+                sendToken(req_pid, 0, System.currentTimeMillis());
 
                 if (!csQueue.isEmpty()) {
                     sendCSRequest();
@@ -746,5 +750,18 @@ public class Raymond {
         finally {
             csLock.unlock();
         }
+    }
+
+    private static void log(String message) {
+        // print message with timestamp:
+        log(System.currentTimeMillis(), message);
+    }
+
+    private static void log(long clock, String message) {
+        int miliseconds = (int) clock % 1000;
+        int seconds = (int) (clock / 1000) % 60 ;
+        int minutes = (int) ((clock / (1000*60)) % 60);
+
+        System.out.format("%02d:%02d.%03d: %s%n", minutes, seconds, miliseconds, message);
     }
 }
