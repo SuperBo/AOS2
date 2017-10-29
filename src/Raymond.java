@@ -65,7 +65,7 @@ public class Raymond {
         Thread csBackground = null;
 
         try {
-            if (args.length != 0 && args[0].equalsIgnoreCase("-c")) {
+            if (args.length != 0 && args[0].equals("-c")) {
                 isCoordinator = true;
                 // Start CoOrdinate thread
                 coorThread = new Thread(Raymond::startCoordinate);
@@ -248,12 +248,14 @@ public class Raymond {
             System.out.println("Total CS Request: " + total_cs);
             System.out.println("Total messages sent: " + total_mess_sent);
             System.out.println("Total wait time: " + all_wait_time +" ms");
+            System.out.println("Total sync delay msg: " + all_sync_delay );
+            System.out.println("Total sync delay time: " + all_sync_delay_time + " ms");
             System.out.format("Messages per CS: %.4f%n", (double) total_mess_sent/total_cs);
             System.out.format("Wait time per CS: %.4f ms%n", (double) all_wait_time/total_cs);
-            System.out.println("Max synchronization delay: " + max_all_sync_delay);
-            System.out.format("Average synchronization delay: %.4f%n", (double) all_sync_delay/total_cs);
-            System.out.println("Max synchronization delay in ms: " + max_sync_delay_time + " ms");
-            System.out.format("Average synchronization delay in time: %.4f ms%n", (double) all_sync_delay_time/total_cs);
+            System.out.println("Max sync delay: " + max_all_sync_delay);
+            System.out.format("Sync delay per CS: %.4f%n", (double) all_sync_delay/total_cs);
+            System.out.println("Max sync delay time: " + max_sync_delay_time + " ms");
+            System.out.format("Sync delay time per CS: %.4f ms%n", (double) all_sync_delay_time/total_cs);
 
             // Send TERMINATED to all and end connection
             for (SocketChannel client : clients.values()) {
@@ -461,8 +463,6 @@ public class Raymond {
                 System.err.println("Second sleep interrupted");
             }
         }
-
-        terminated = true;
     }
 
     private static void completeRunning() {
@@ -552,11 +552,11 @@ public class Raymond {
                         int i = 0;
                         while (i < msg.length) {
                             long msg_clock = Long.parseLong(msg[i]);
-                            log("received " + msg[i+1]);
                             i++;
 
                             // On receiving REQUEST
                             if (msg[i].equals("REQUEST")) {
+                                log("received " + "REQUEST " + msg[i+1]);
                                 int asked_pid = Integer.parseInt(msg[i+1]);
                                 csLock.lock();
                                 try {
@@ -585,6 +585,7 @@ public class Raymond {
                             }
                             // On receiving TOKEN
                             else if (msg[i].equals("TOKEN")) {
+                                log("received " + msg[i]);
                                 int prev_hop = Integer.parseInt(msg[i+1]);
                                 long token_time = Long.parseLong(msg[i+2]);
                                 int hop = prev_hop + 1;
@@ -626,7 +627,7 @@ public class Raymond {
     private static void sendCSRequest() {
         String msg;
         long clock = System.currentTimeMillis();
-        System.out.println(clock + ": Send REQUEST to " + holderPID);
+        log(clock, "Send REQUEST to " + holderPID);
         msg = clock + " REQUEST " + PROCESSID + " ";
 
         SocketChannel tokenChannel = neighbourSockets.get(holderPID);
