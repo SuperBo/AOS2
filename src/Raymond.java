@@ -759,8 +759,8 @@ public class Raymond {
     }
 
     private static void log(long clock, String message) {
-        int miliseconds = (int) clock % 1000;
-        int seconds = (int) (clock / 1000) % 60 ;
+        int miliseconds = (int) (clock % 1000);
+        int seconds = (int) ((clock / 1000) % 60) ;
         int minutes = (int) ((clock / (1000*60)) % 60);
 
         System.out.format("%02d:%02d.%03d: %s%n", minutes, seconds, miliseconds, message);
